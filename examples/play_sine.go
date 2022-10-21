@@ -8,7 +8,7 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/DrGolem/go-portaudio/portaudio"
+	"github.com/drgolem/go-portaudio/portaudio"
 )
 
 func main() {

@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/DrGolem/go-portaudio/portaudio"
+	"github.com/drgolem/go-portaudio/portaudio"
 )
 
 func main() {
