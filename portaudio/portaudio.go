@@ -196,7 +196,6 @@ func NewStream(outParams PaStreamParameters, sampleRate float32) (*PaStream, err
 }
 
 func (s *PaStream) Open(framesPerBuffer int) error {
-
 	// get device info
 	di, err := GetDeviceInfo(s.OutputParameters.DeviceIndex)
 	if err != nil {
@@ -269,6 +268,19 @@ func (s *PaStream) StopStream() error {
 	}
 
 	return nil
+}
+
+func (s *PaStream) GetWriteAvailable() (int, error) {
+	if !s.isOpen {
+		return 0, &PaError{int(C.paBadStreamPtr)}
+	}
+
+	wa := C.Pa_GetStreamWriteAvailable(s.stream)
+	if wa < 0 {
+		return 0, &PaError{int(wa)}
+	}
+
+	return int(wa), nil
 }
 
 func (s *PaStream) Write(frames int, buf []byte) error {
