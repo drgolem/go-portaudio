@@ -56,12 +56,14 @@ func main() {
 		SampleFormat: portaudio.SampleFmtFloat32,
 		//SampleFormat: portaudio.SampleFmtInt24,
 	}
-	sampleRate := float32(44100)
-	err = portaudio.IsFormatSupported(nil, &outStreamParams, sampleRate)
-	if err != nil {
-		fmt.Printf("ERR: %v\n", err)
-		return
-	} else {
-		fmt.Printf("Format supported: %v, sampleRate: %f\n", outStreamParams, sampleRate)
+
+	sampleRates := []float32{44100, 48000, 96000}
+	for _, sampleRate := range sampleRates {
+		err = portaudio.IsFormatSupported(nil, &outStreamParams, sampleRate)
+		if err != nil {
+			fmt.Printf("ERR: %v, sampleRate: %f\n", err, sampleRate)
+		} else {
+			fmt.Printf("Format supported: %v, sampleRate: %f\n", outStreamParams, sampleRate)
+		}
 	}
 }

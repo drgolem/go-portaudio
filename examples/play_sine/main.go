@@ -2,11 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"math"
-	"os"
 	"os/signal"
+	"syscall"
 
 	"github.com/drgolem/go-portaudio/portaudio"
 )
@@ -30,7 +31,7 @@ func main() {
 		fmt.Printf("device count: %d\n", devCnt)
 	}
 
-	for devIdx := 0; devIdx < devCnt; devIdx++ {
+	for devIdx := range devCnt {
 		di, err := portaudio.GetDeviceInfo(devIdx)
 		if err != nil {
 			fmt.Printf("ERR: %v\n", err)
@@ -46,7 +47,7 @@ func main() {
 	}
 
 	fmt.Printf("Host API Info (count: %d)\n", hostApiCnt)
-	for idx := 0; idx < hostApiCnt; idx++ {
+	for idx := range hostApiCnt {
 		hi, err := portaudio.GetHostApiInfo(idx)
 		if err != nil {
 			fmt.Printf("ERR: %v\n", err)
@@ -84,16 +85,19 @@ func main() {
 	}
 	defer st.Close()
 
-	fmt.Println("Playing.  Press Ctrl-C to stop.")
+	ctx, ctxCancelFn := context.WithCancel(context.Background())
+	defer ctxCancelFn()
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, os.Kill)
+	fmt.Printf("Press Ctrl-C to stop.\n")
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	err = st.StartStream()
 	if err != nil {
 		fmt.Printf("ERR: %v\n", err)
 		return
 	}
+	defer st.StopStream()
 
 	dataBuffer := make([]float32, 2*framesPerBuffer)
 
@@ -130,11 +134,10 @@ func main() {
 		}
 
 		select {
-		case <-sig:
+		case <-ctx.Done():
 			return
 		default:
 		}
 	}
 
-	st.StopStream()
 }

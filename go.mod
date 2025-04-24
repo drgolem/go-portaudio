@@ -1,3 +1,3 @@
 module github.com/drgolem/go-portaudio
 
-go 1.18
+go 1.23
