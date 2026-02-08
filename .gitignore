@@ -10,6 +10,35 @@
 
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
+coverage.out
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# Compiled example binaries (no extension on Unix)
+/audio_enum
+/play_sine
+/play_sine_async
+/play_sine_callback
+/play_raw
+/record_audio
+/test_helpers
+examples/audio_enum/audio_enum
+examples/play_sine/play_sine
+examples/play_sine_async/play_sine_async
+examples/play_sine_callback/play_sine_callback
+examples/play_raw/play_raw
+examples/record_audio/record_audio
+examples/test_helpers/test_helpers
+
+# Audio recording outputs
+*.raw
+*.pcm
+*.wav
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Dependency directories
+vendor/

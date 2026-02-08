@@ -1,13 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
 	"fmt"
 	"math"
 	"os/signal"
 	"syscall"
+	"unsafe"
 
 	"github.com/drgolem/go-portaudio/portaudio"
 )
@@ -60,9 +59,8 @@ func main() {
 		DeviceIndex:  1,
 		ChannelCount: 2,
 		SampleFormat: portaudio.SampleFmtFloat32,
-		//SampleFormat: portaudio.SampleFmtInt24,
 	}
-	sampleRate := float32(44100)
+	sampleRate := float64(44100)
 	err = portaudio.IsFormatSupported(nil, &outStreamParams, sampleRate)
 	if err != nil {
 		fmt.Printf("ERR: %v\n", err)
@@ -78,6 +76,13 @@ func main() {
 		fmt.Printf("ERR: %v\n", err)
 		return
 	}
+
+	// Configure for blocking I/O: use ClipOff flag and high latency
+	// ClipOff is safe since sine wave output is guaranteed to be within [-1.0, 1.0]
+	// High latency helps avoid underruns in blocking I/O mode
+	st.StreamFlags = portaudio.ClipOff
+	st.UseHighLatency = true
+
 	err = st.Open(framesPerBuffer)
 	if err != nil {
 		fmt.Printf("ERR: %v\n", err)
@@ -119,16 +124,10 @@ func main() {
 			_, phaseR = math.Modf(phaseR + stepR)
 		}
 
-		buf := new(bytes.Buffer)
-		for _, d := range dataBuffer {
-			err := binary.Write(buf, binary.LittleEndian, d)
-			if err != nil {
-				fmt.Println("binary.Write failed:", err)
-				panic(err)
-			}
-		}
+		// Convert []float32 to []byte using unsafe (zero-copy, much faster)
+		buf := unsafe.Slice((*byte)(unsafe.Pointer(&dataBuffer[0])), len(dataBuffer)*4)
 
-		err = st.Write(framesPerBuffer, buf.Bytes())
+		err = st.Write(framesPerBuffer, buf)
 		if err != nil {
 			panic(err)
 		}

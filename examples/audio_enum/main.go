@@ -54,10 +54,9 @@ func main() {
 		DeviceIndex:  1,
 		ChannelCount: 2,
 		SampleFormat: portaudio.SampleFmtFloat32,
-		//SampleFormat: portaudio.SampleFmtInt24,
 	}
 
-	sampleRates := []float32{44100, 48000, 96000}
+	sampleRates := []float64{44100, 48000, 96000}
 	for _, sampleRate := range sampleRates {
 		err = portaudio.IsFormatSupported(nil, &outStreamParams, sampleRate)
 		if err != nil {
