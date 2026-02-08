@@ -4,6 +4,7 @@ package portaudio
 #cgo pkg-config: portaudio-2.0
 #include <portaudio.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 // Forward declaration of Go callback bridge
 extern int goCallbackBridge(void *input, void *output,
@@ -113,12 +114,12 @@ type StreamCallbackTimeInfo struct {
 
 // streamCallbackInfo holds callback and stream parameters for proper buffer sizing
 type streamCallbackInfo struct {
-	callback         StreamCallback
-	outputChannels   int
-	outputFormat     PaSampleFormat
-	inputChannels    int
-	inputFormat      PaSampleFormat
-	hasInput         bool
+	callback       StreamCallback
+	outputChannels int
+	outputFormat   PaSampleFormat
+	inputChannels  int
+	inputFormat    PaSampleFormat
+	hasInput       bool
 }
 
 // Callback registry to map stream IDs to Go callbacks and stream parameters
@@ -307,7 +308,7 @@ func goCallbackBridge(input, output unsafe.Pointer,
 	if input != nil && info.hasInput {
 		inputSampleSize := GetSampleSize(info.inputFormat)
 		inputSize := int(frameCount) * info.inputChannels * inputSampleSize
-		if inputSize > 0 && inputSize <= (1 << 20) { // Sanity check: max 1MB
+		if inputSize > 0 && inputSize <= (1<<20) { // Sanity check: max 1MB
 			inputBuf = (*[1 << 20]byte)(input)[:inputSize:inputSize]
 		}
 	}
@@ -316,7 +317,7 @@ func goCallbackBridge(input, output unsafe.Pointer,
 	if output != nil {
 		outputSampleSize := GetSampleSize(info.outputFormat)
 		outputSize := int(frameCount) * info.outputChannels * outputSampleSize
-		if outputSize > 0 && outputSize <= (1 << 20) { // Sanity check: max 1MB
+		if outputSize > 0 && outputSize <= (1<<20) { // Sanity check: max 1MB
 			outputBuf = (*[1 << 20]byte)(output)[:outputSize:outputSize]
 		}
 	}
