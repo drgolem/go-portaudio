@@ -218,6 +218,8 @@ type PaStream struct {
 	UseHighLatency bool
 	// callbackID stores the stream ID for callback-based streams (internal use)
 	callbackID int
+	// callbackIDPtr stores the C-allocated pointer to the stream ID (for cleanup)
+	callbackIDPtr unsafe.Pointer
 }
 
 func (e *PaError) Error() string {
@@ -289,7 +291,7 @@ func Initialize() error {
 	if initialized == 0 {
 		errCode := C.Pa_Initialize()
 		if errCode != C.paNoError {
-			return &PaError{int(errCode)}
+			return newError(errCode)
 		}
 	}
 	initialized++
@@ -321,7 +323,7 @@ func Terminate() error {
 		errCode := C.Pa_Terminate()
 		if errCode != C.paNoError {
 			initialized++ // restore count on error
-			return &PaError{int(errCode)}
+			return newError(errCode)
 		}
 	}
 	return nil
@@ -376,6 +378,8 @@ func DefaultOutputDevice() (*DeviceInfo, error) {
 // const PaDeviceInfo* Pa_GetDeviceInfo	(	PaDeviceIndex 	device	)
 
 type DeviceInfo struct {
+	// Index is the PortAudio device index used when opening streams
+	Index int
 	// const char * 	name
 	Name string
 	// PaHostApiIndex 	hostApi
@@ -403,6 +407,7 @@ func GetDeviceInfo(deviceIdx int) (*DeviceInfo, error) {
 	}
 
 	devInfo := DeviceInfo{
+		Index:                    deviceIdx,
 		Name:                     C.GoString(di.name),
 		HostApiIndex:             int(di.hostApi),
 		MaxInputChannels:         int(di.maxInputChannels),
@@ -491,7 +496,7 @@ func IsFormatSupported(inputParameters *PaStreamParameters, outputParameters *Pa
 
 	errCode := C.Pa_IsFormatSupported(inParams, outParams, C.double(sampleRate))
 	if errCode != C.paFormatIsSupported {
-		return &PaError{int(errCode)}
+		return newError(errCode)
 	}
 	return nil
 }
@@ -678,7 +683,7 @@ func OpenDefaultStream(channels int, sampleFormat PaSampleFormat, sampleRate flo
 	var stream *PaStream
 	if callback != nil {
 		// Callback mode
-		stream, err = NewCallbackStream(device.HostApiIndex, channels, sampleFormat, sampleRate)
+		stream, err = NewCallbackStream(device.Index, channels, sampleFormat, sampleRate)
 		if err != nil {
 			return nil, err
 		}
@@ -687,7 +692,7 @@ func OpenDefaultStream(channels int, sampleFormat PaSampleFormat, sampleRate flo
 		}
 	} else {
 		// Blocking I/O mode
-		stream, err = NewOutputStream(device.HostApiIndex, channels, sampleFormat, sampleRate)
+		stream, err = NewOutputStream(device.Index, channels, sampleFormat, sampleRate)
 		if err != nil {
 			return nil, err
 		}
@@ -766,7 +771,7 @@ func (s *PaStream) Open(framesPerBuffer int) error {
 		nil)
 
 	if errCode != C.paNoError {
-		return &PaError{int(errCode)}
+		return newError(errCode)
 	}
 
 	s.isOpen = true
@@ -781,7 +786,7 @@ func (s *PaStream) Close() error {
 
 	errCode := C.Pa_CloseStream(s.stream)
 	if errCode != C.paNoError {
-		return &PaError{int(errCode)}
+		return newError(errCode)
 	}
 
 	s.isOpen = false
@@ -796,7 +801,7 @@ func (s *PaStream) StartStream() error {
 
 	errCode := C.Pa_StartStream(s.stream)
 	if errCode != C.paNoError {
-		return &PaError{int(errCode)}
+		return newError(errCode)
 	}
 
 	return nil
@@ -809,7 +814,7 @@ func (s *PaStream) StopStream() error {
 
 	errCode := C.Pa_StopStream(s.stream)
 	if errCode != C.paNoError {
-		return &PaError{int(errCode)}
+		return newError(errCode)
 	}
 
 	return nil
@@ -883,7 +888,7 @@ func (s *PaStream) Write(frames int, buf []byte) error {
 
 	errCode := C.Pa_WriteStream(s.stream, buffer, C.ulong(frames))
 	if errCode != C.paNoError {
-		return &PaError{int(errCode)}
+		return newError(errCode)
 	}
 
 	return nil

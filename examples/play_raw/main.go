@@ -8,7 +8,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"sync"
 	"sync/atomic"
 	"syscall"
 
@@ -23,8 +22,8 @@ type RawAudioPlayer struct {
 	sampleRate     int
 	bytesPerSample int
 	buffer         []byte
-	mu             sync.Mutex
 	samplesPlayed  atomic.Uint64
+	underflows     atomic.Uint64
 	eof            atomic.Bool
 }
 
@@ -145,6 +144,9 @@ func main() {
 	samples := player.GetSamplesPlayed()
 	durationSec := float64(samples) / float64(*sampleRate)
 	fmt.Printf("Played: %d samples (%.2f seconds)\n", samples, durationSec)
+	if u := player.underflows.Load(); u > 0 {
+		fmt.Printf("Warning: %d output underflow(s) detected (audio glitches)\n", u)
+	}
 }
 
 func listOutputDevices() {
@@ -245,17 +247,15 @@ func (p *RawAudioPlayer) audioCallback(
 	statusFlags portaudio.StreamCallbackFlags,
 ) portaudio.StreamCallbackResult {
 
-	// Check for output underflow
+	// Track output underflow (check from main goroutine via p.underflows)
 	if statusFlags&portaudio.OutputUnderflow != 0 {
-		fmt.Fprintf(os.Stderr, "\nWarning: Output underflow detected (audio glitch)\n")
+		p.underflows.Add(1)
 	}
 
 	bytesNeeded := int(frameCount) * p.channels * p.bytesPerSample
 
 	// Read from file
-	p.mu.Lock()
 	n, err := io.ReadFull(p.file, output[:bytesNeeded])
-	p.mu.Unlock()
 
 	if err == io.EOF || err == io.ErrUnexpectedEOF {
 		// End of file reached
@@ -270,7 +270,6 @@ func (p *RawAudioPlayer) audioCallback(
 	}
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\nError reading from file: %v\n", err)
 		return portaudio.Abort
 	}
 

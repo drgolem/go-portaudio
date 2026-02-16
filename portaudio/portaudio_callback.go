@@ -19,8 +19,8 @@ static int paStreamCallbackWrapper(const void *input, void *output,
                                    const PaStreamCallbackTimeInfo* timeInfo,
                                    PaStreamCallbackFlags statusFlags,
                                    void *userData) {
-    // Cast userData (which contains a stream ID) to long
-    long streamId = (long)(intptr_t)userData;
+    // userData points to a malloc'd long containing the stream ID
+    long streamId = *(long*)userData;
     return goCallbackBridge((void*)input, output, frameCount,
                            (void*)timeInfo, (unsigned long)statusFlags, streamId);
 }
@@ -120,6 +120,9 @@ type streamCallbackInfo struct {
 	inputChannels  int
 	inputFormat    PaSampleFormat
 	hasInput       bool
+	// timeInfo is pre-allocated to avoid allocation in the callback hot path.
+	// Safe because PortAudio invokes callbacks sequentially per stream.
+	timeInfo StreamCallbackTimeInfo
 }
 
 // Callback registry to map stream IDs to Go callbacks and stream parameters
@@ -238,26 +241,31 @@ func (s *PaStream) OpenCallback(framesPerBuffer int, callback StreamCallback) er
 	// This avoids passing Go pointers to C (cgo safety)
 	streamID := registerCallback(callback, info)
 
+	// Allocate C memory for the stream ID to pass as userData.
+	// This avoids unsafe.Pointer(uintptr(int)) which fails Go's checkptr
+	// validation under -race. The C callback dereferences this pointer to
+	// retrieve the stream ID.
+	streamIDPtr := (*C.long)(C.malloc(C.size_t(unsafe.Sizeof(C.long(0)))))
+	*streamIDPtr = C.long(streamID)
+
 	// Open stream with callback using our C helper
-	// Pass the stream ID as userData (cast to void*)
-	// Note: Converting int → uintptr → unsafe.Pointer is safe here because
-	// streamID is an integer value, not a Go pointer. We're using the pointer
-	// as an integer tag (userData), which is a standard C pattern.
 	errCode := C.openStreamWithCallback(&s.stream,
 		unsafe.Pointer(inParams),
 		unsafe.Pointer(outParams),
 		C.double(s.SampleRate),
 		C.ulong(framesPerBuffer),
 		C.ulong(streamFlags),
-		unsafe.Pointer(uintptr(streamID))) //nolint:govet // Safe: integer as user data, not a pointer
+		unsafe.Pointer(streamIDPtr))
 
 	if errCode != C.paNoError {
+		C.free(unsafe.Pointer(streamIDPtr))
 		unregisterCallback(streamID)
-		return &PaError{int(errCode)}
+		return newError(C.PaError(errCode))
 	}
 
-	// Store the stream ID in the PaStream struct so we can clean up later
+	// Store the stream ID and C pointer for cleanup
 	s.callbackID = streamID
+	s.callbackIDPtr = unsafe.Pointer(streamIDPtr)
 	s.isOpen = true
 
 	return nil
@@ -269,6 +277,10 @@ func (s *PaStream) CloseCallback() error {
 	if s.callbackID != 0 {
 		unregisterCallback(s.callbackID)
 		s.callbackID = 0
+	}
+	if s.callbackIDPtr != nil {
+		C.free(s.callbackIDPtr)
+		s.callbackIDPtr = nil
 	}
 	return s.Close()
 }
@@ -322,15 +334,14 @@ func goCallbackBridge(input, output unsafe.Pointer,
 		}
 	}
 
-	// Convert timeInfo from C struct to Go struct
+	// Convert timeInfo from C struct to Go struct (reuse pre-allocated struct)
 	var timeInfoGo *StreamCallbackTimeInfo
 	if timeInfo != nil {
 		cTimeInfo := (*C.PaStreamCallbackTimeInfo)(timeInfo)
-		timeInfoGo = &StreamCallbackTimeInfo{
-			InputBufferAdcTime:  PaTime(cTimeInfo.inputBufferAdcTime),
-			CurrentTime:         PaTime(cTimeInfo.currentTime),
-			OutputBufferDacTime: PaTime(cTimeInfo.outputBufferDacTime),
-		}
+		info.timeInfo.InputBufferAdcTime = PaTime(cTimeInfo.inputBufferAdcTime)
+		info.timeInfo.CurrentTime = PaTime(cTimeInfo.currentTime)
+		info.timeInfo.OutputBufferDacTime = PaTime(cTimeInfo.outputBufferDacTime)
+		timeInfoGo = &info.timeInfo
 	}
 
 	// Call the Go callback

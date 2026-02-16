@@ -13,34 +13,28 @@ import (
 
 // Sine wave generator state
 type sineGenerator struct {
-	phaseL      float64
-	phaseR      float64
-	stepL       float64
-	stepR       float64
-	sampleRate  float64
-	channels    int
-	sampleFormat portaudio.PaSampleFormat
+	phaseL   float64
+	phaseR   float64
+	stepL    float64
+	stepR    float64
+	channels int
+	// samples is pre-allocated to avoid allocation in the real-time callback
+	samples []float32
 }
 
-func newSineGenerator(sampleRate float64, freqL, freqR float64, channels int, format portaudio.PaSampleFormat) *sineGenerator {
+func newSineGenerator(freqL, freqR float64, sampleRate float64, channels int, framesPerBuffer int) *sineGenerator {
 	return &sineGenerator{
-		phaseL:      0,
-		phaseR:      0,
-		stepL:       freqL / sampleRate,
-		stepR:       freqR / sampleRate,
-		sampleRate:  sampleRate,
-		channels:    channels,
-		sampleFormat: format,
+		stepL:    freqL / sampleRate,
+		stepR:    freqR / sampleRate,
+		channels: channels,
+		samples:  make([]float32, framesPerBuffer*channels),
 	}
 }
 
 // Callback function that generates sine wave audio
 func (sg *sineGenerator) audioCallback(input, output []byte, frameCount uint, timeInfo *portaudio.StreamCallbackTimeInfo, statusFlags portaudio.StreamCallbackFlags) portaudio.StreamCallbackResult {
-	// Calculate how many samples we need (frames * channels)
 	sampleCount := int(frameCount) * sg.channels
-
-	// Create a float32 buffer for the audio samples
-	samples := make([]float32, sampleCount)
+	samples := sg.samples[:sampleCount]
 
 	// Generate stereo sine wave samples
 	for i := 0; i < sampleCount; {
@@ -116,7 +110,7 @@ func main() {
 
 	// Create sine wave generator
 	// Left channel: 256 Hz, Right channel: 320 Hz
-	generator := newSineGenerator(sampleRate, 256.0, 320.0, outStreamParams.ChannelCount, outStreamParams.SampleFormat)
+	generator := newSineGenerator(256.0, 320.0, sampleRate, outStreamParams.ChannelCount, framesPerBuffer)
 
 	// Open stream with callback
 	err = st.OpenCallback(framesPerBuffer, generator.audioCallback)

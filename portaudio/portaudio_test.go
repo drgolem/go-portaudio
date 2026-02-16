@@ -300,11 +300,8 @@ func TestNewOutputStream(t *testing.T) {
 		t.Skip("No default output device available")
 	}
 
-	// Use device index 1 (common default output device on macOS)
-	deviceIdx := 1
-
 	// Create output stream
-	stream, err := NewOutputStream(deviceIdx, 2, SampleFmtInt16, 44100)
+	stream, err := NewOutputStream(outputDevice.Index, 2, SampleFmtInt16, 44100)
 	if err != nil {
 		t.Fatalf("NewOutputStream failed: %v", err)
 	}
@@ -346,11 +343,8 @@ func TestNewCallbackStream(t *testing.T) {
 		t.Skip("No default output device available")
 	}
 
-	// Use device index 1 (common default output device on macOS)
-	deviceIdx := 1
-
 	// Create callback stream
-	stream, err := NewCallbackStream(deviceIdx, 2, SampleFmtFloat32, 44100)
+	stream, err := NewCallbackStream(outputDevice.Index, 2, SampleFmtFloat32, 44100)
 	if err != nil {
 		t.Fatalf("NewCallbackStream failed: %v", err)
 	}
@@ -392,12 +386,9 @@ func TestNewInputStream(t *testing.T) {
 		t.Skip("No default input device available")
 	}
 
-	// Use device index 0 (common default input device on macOS)
-	deviceIdx := 0
-
 	// Create input stream parameters
 	params := PaStreamParameters{
-		DeviceIndex:  deviceIdx,
+		DeviceIndex:  inputDevice.Index,
 		ChannelCount: 1,
 		SampleFormat: SampleFmtInt16,
 	}
@@ -441,9 +432,6 @@ func TestIsFormatSupported(t *testing.T) {
 		t.Skip("No default output device available")
 	}
 
-	// Use device index 1 (common default output device on macOS)
-	deviceIdx := 1
-
 	tests := []struct {
 		name       string
 		channels   int
@@ -461,7 +449,7 @@ func TestIsFormatSupported(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			params := &PaStreamParameters{
-				DeviceIndex:  deviceIdx,
+				DeviceIndex:  outputDevice.Index,
 				ChannelCount: tt.channels,
 				SampleFormat: tt.format,
 			}
@@ -493,11 +481,8 @@ func TestStreamLifecycle(t *testing.T) {
 		t.Skip("No default output device available")
 	}
 
-	// Use device index 1 (common default output device on macOS)
-	deviceIdx := 1
-
 	// Create stream
-	stream, err := NewOutputStream(deviceIdx, 2, SampleFmtInt16, 44100)
+	stream, err := NewOutputStream(outputDevice.Index, 2, SampleFmtInt16, 44100)
 	if err != nil {
 		t.Fatalf("NewOutputStream failed: %v", err)
 	}
@@ -539,11 +524,8 @@ func TestCallbackStreamLifecycle(t *testing.T) {
 		t.Skip("No default output device available")
 	}
 
-	// Use device index 1 (common default output device on macOS)
-	deviceIdx := 1
-
 	// Create callback stream
-	stream, err := NewCallbackStream(deviceIdx, 2, SampleFmtFloat32, 44100)
+	stream, err := NewCallbackStream(outputDevice.Index, 2, SampleFmtFloat32, 44100)
 	if err != nil {
 		t.Fatalf("NewCallbackStream failed: %v", err)
 	}
@@ -596,11 +578,8 @@ func TestGetWriteAvailable(t *testing.T) {
 		t.Skip("No default output device available")
 	}
 
-	// Use device index 1 (common default output device on macOS)
-	deviceIdx := 1
-
 	// Create and open stream
-	stream, err := NewOutputStream(deviceIdx, 2, SampleFmtInt16, 44100)
+	stream, err := NewOutputStream(outputDevice.Index, 2, SampleFmtInt16, 44100)
 	if err != nil {
 		t.Fatalf("NewOutputStream failed: %v", err)
 	}
@@ -642,10 +621,7 @@ func TestInvalidOperations(t *testing.T) {
 		t.Skip("No default output device available")
 	}
 
-	// Use device index 1 (common default output device on macOS)
-	deviceIdx := 1
-
-	stream, err := NewOutputStream(deviceIdx, 2, SampleFmtInt16, 44100)
+	stream, err := NewOutputStream(outputDevice.Index, 2, SampleFmtInt16, 44100)
 	if err != nil {
 		t.Fatalf("NewOutputStream failed: %v", err)
 	}

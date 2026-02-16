@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -24,7 +23,7 @@ type AudioRecorder struct {
 	sampleRate     int
 	bytesPerSample int
 	samplesWritten atomic.Uint64
-	mu             sync.Mutex
+	overflows      atomic.Uint64
 	done           chan struct{}
 }
 
@@ -129,6 +128,9 @@ func main() {
 	durationSec := float64(samples) / float64(*sampleRate)
 	fmt.Printf("Recording complete: %d samples (%.2f seconds)\n", samples, durationSec)
 	fmt.Printf("Output file: %s\n", *outputFile)
+	if o := recorder.overflows.Load(); o > 0 {
+		fmt.Printf("Warning: %d input overflow(s) detected (audio data lost)\n", o)
+	}
 }
 
 func listInputDevices() {
@@ -235,19 +237,16 @@ func (r *AudioRecorder) audioCallback(
 	statusFlags portaudio.StreamCallbackFlags,
 ) portaudio.StreamCallbackResult {
 
-	// Check for input overflow (data loss)
+	// Track input overflow (check from main goroutine via r.overflows)
 	if statusFlags&portaudio.InputOverflow != 0 {
-		fmt.Fprintf(os.Stderr, "\nWarning: Input overflow detected (audio data lost)\n")
+		r.overflows.Add(1)
 	}
 
 	// Write input data to file
 	if len(input) > 0 {
-		r.mu.Lock()
 		n, err := r.file.Write(input)
-		r.mu.Unlock()
 
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "\nError writing to file: %v\n", err)
 			return portaudio.Abort
 		}
 
