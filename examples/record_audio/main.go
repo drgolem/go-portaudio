@@ -5,7 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sync/atomic"
@@ -61,89 +61,88 @@ func main() {
 	}
 	flag.Parse()
 
-	// Initialize PortAudio
-	fmt.Println("Initializing PortAudio...")
 	if err := portaudio.Initialize(); err != nil {
-		log.Fatal("Failed to initialize PortAudio:", err)
+		slog.Error("failed to initialize PortAudio", "error", err)
+		os.Exit(1)
 	}
 	defer portaudio.Terminate()
 
-	fmt.Printf("PortAudio version: %s\n", portaudio.GetVersionText())
+	slog.Info("PortAudio initialized", "version", portaudio.GetVersionText())
 
-	// List devices if requested
 	if *listDevices {
 		listInputDevices()
 		return
 	}
 
-	// Get input device
 	device, err := portaudio.GetDeviceInfo(*deviceIdx)
 	if err != nil {
-		log.Fatalf("Failed to get device %d: %v", *deviceIdx, err)
+		slog.Error("failed to get device", "device", *deviceIdx, "error", err)
+		os.Exit(1)
 	}
-	fmt.Printf("Using input device %d: %s\n", *deviceIdx, device.Name)
+	slog.Info("using input device", "index", *deviceIdx, "name", device.Name)
 
-	// Validate parameters
 	if *channels < 1 || *channels > device.MaxInputChannels {
-		log.Fatalf("Invalid channel count %d (device supports 1-%d)", *channels, device.MaxInputChannels)
+		slog.Error("invalid channel count", "channels", *channels, "max", device.MaxInputChannels)
+		os.Exit(1)
 	}
 
 	sampleFormat, err := sampleFormatFromBits(*bitsPerSample)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("invalid sample format", "error", err)
+		os.Exit(1)
 	}
 
-	// Create recorder
 	recorder, err := NewAudioRecorder(*deviceIdx, *channels, sampleFormat, *sampleRate, *outputFile)
 	if err != nil {
-		log.Fatal("Failed to create recorder:", err)
+		slog.Error("failed to create recorder", "error", err)
+		os.Exit(1)
 	}
 	defer recorder.Close()
 
-	// Setup signal handler for graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Start recording
-	fmt.Printf("Recording to %s...\n", *outputFile)
-	fmt.Printf("Configuration: %d channel(s), %d Hz, %d-bit PCM\n", *channels, *sampleRate, *bitsPerSample)
-	fmt.Println("Press Ctrl-C to stop recording")
+	slog.Info("starting recording",
+		"file", *outputFile,
+		"channels", *channels,
+		"sample_rate", *sampleRate,
+		"bits", *bitsPerSample,
+	)
+	slog.Info("press Ctrl-C to stop recording")
 
 	if err := recorder.Start(); err != nil {
-		log.Fatal("Failed to start recording:", err)
+		slog.Error("failed to start recording", "error", err)
+		os.Exit(1)
 	}
 
-	// Wait for signal or duration
 	if *duration > 0 {
-		fmt.Printf("Recording for %d seconds...\n", *duration)
+		slog.Info("recording for duration", "seconds", *duration)
 		select {
 		case <-ctx.Done():
-			// User interrupted
 		case <-time.After(time.Duration(*duration) * time.Second):
-			// Duration reached
 		}
 	} else {
 		<-ctx.Done()
 	}
-	fmt.Println("\nStopping recording...")
+	slog.Info("stopping recording")
 
 	if err := recorder.Stop(); err != nil {
-		log.Println("Warning: Error stopping recorder:", err)
+		slog.Warn("error stopping recorder", "error", err)
 	}
 
 	samples := recorder.GetSamplesWritten()
 	durationSec := float64(samples) / float64(*sampleRate)
-	fmt.Printf("Recording complete: %d samples (%.2f seconds)\n", samples, durationSec)
-	fmt.Printf("Output file: %s\n", *outputFile)
+	slog.Info("recording complete", "samples", samples, "duration_sec", durationSec, "file", *outputFile)
 	if o := recorder.overflows.Load(); o > 0 {
-		fmt.Printf("Warning: %d input overflow(s) detected (audio data lost)\n", o)
+		slog.Warn("input overflows detected", "count", o)
 	}
 }
 
 func listInputDevices() {
 	devices, err := portaudio.Devices()
 	if err != nil {
-		log.Fatal("Failed to get devices:", err)
+		slog.Error("failed to get devices", "error", err)
+		os.Exit(1)
 	}
 
 	fmt.Println("\nAvailable Input Devices:")

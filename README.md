@@ -250,8 +250,7 @@ See [REVIEW_AND_RECOMMENDATIONS.md](REVIEW_AND_RECOMMENDATIONS.md) for detailed 
 ## Platform Support
 
 - ✅ **macOS** - Tested on Apple Silicon (M2 Pro)
-- ❓ **Linux** - Should work (not extensively tested)
-- ❓ **Windows** - Should work (not extensively tested)
+- ✅ **Linux** - Tested on Raspberry Pi 5
 
 ## Credits & Inspiration
 

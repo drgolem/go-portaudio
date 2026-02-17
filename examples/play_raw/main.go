@@ -6,7 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sync/atomic"
@@ -74,67 +74,68 @@ func main() {
 	}
 	flag.Parse()
 
-	// Initialize PortAudio
-	fmt.Println("Initializing PortAudio...")
 	if err := portaudio.Initialize(); err != nil {
-		log.Fatal("Failed to initialize PortAudio:", err)
+		slog.Error("failed to initialize PortAudio", "error", err)
+		os.Exit(1)
 	}
 	defer portaudio.Terminate()
 
-	fmt.Printf("PortAudio version: %s\n", portaudio.GetVersionText())
+	slog.Info("PortAudio initialized", "version", portaudio.GetVersionText())
 
-	// List devices if requested
 	if *listDevices {
 		listOutputDevices()
 		return
 	}
 
-	// Validate input
 	if *inputFile == "" {
-		fmt.Fprintln(os.Stderr, "Error: Input file is required")
+		slog.Error("input file is required")
 		flag.Usage()
 		os.Exit(1)
 	}
 
 	sampleFormat, err := sampleFormatFromBits(*bitsPerSample)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("invalid sample format", "error", err)
+		os.Exit(1)
 	}
 
-	// Get output device
 	device, err := portaudio.GetDeviceInfo(*deviceIdx)
 	if err != nil {
-		log.Fatalf("Failed to get device %d: %v", *deviceIdx, err)
+		slog.Error("failed to get device", "device", *deviceIdx, "error", err)
+		os.Exit(1)
 	}
-	fmt.Printf("Using output device %d: %s\n", *deviceIdx, device.Name)
+	slog.Info("using output device", "index", *deviceIdx, "name", device.Name)
 
 	bytesPerSample := *bitsPerSample / 8
 	player, err := NewRawAudioPlayer(*deviceIdx, *channels, sampleFormat, *sampleRate, *bufferFrames, *inputFile)
 	if err != nil {
-		log.Fatal("Failed to create player:", err)
+		slog.Error("failed to create player", "error", err)
+		os.Exit(1)
 	}
 	defer player.Close()
 
-	// Get file size for duration estimate
-	fileInfo, err := os.Stat(*inputFile)
-	if err == nil {
+	if fileInfo, err := os.Stat(*inputFile); err == nil {
 		fileSize := fileInfo.Size()
 		samples := fileSize / int64(*channels*bytesPerSample)
 		durationSec := float64(samples) / float64(*sampleRate)
-		fmt.Printf("File size: %d bytes (%.2f seconds)\n", fileSize, durationSec)
+		slog.Info("file info", "bytes", fileSize, "duration_sec", durationSec)
 	}
 
-	// Setup signal handler for graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Printf("Playing %s...\n", *inputFile)
-	fmt.Printf("Configuration: %d channel(s), %d Hz, %d-bit PCM, buffer %d frames\n",
-		*channels, *sampleRate, *bitsPerSample, *bufferFrames)
-	fmt.Println("Press Ctrl-C to stop playback")
+	slog.Info("starting playback",
+		"file", *inputFile,
+		"channels", *channels,
+		"sample_rate", *sampleRate,
+		"bits", *bitsPerSample,
+		"buffer_frames", *bufferFrames,
+	)
+	slog.Info("press Ctrl-C to stop playback")
 
 	if err := player.Start(); err != nil {
-		log.Fatal("Failed to start playback:", err)
+		slog.Error("failed to start playback", "error", err)
+		os.Exit(1)
 	}
 
 	// Wait for completion or interrupt
@@ -153,18 +154,18 @@ func main() {
 
 	select {
 	case <-done:
-		fmt.Println("\nPlayback complete")
+		slog.Info("playback complete")
 	case <-ctx.Done():
-		fmt.Println("\nPlayback interrupted")
+		slog.Info("playback interrupted")
 	}
 
 	if err := player.Stop(); err != nil {
-		log.Println("Warning: Error stopping player:", err)
+		slog.Warn("error stopping player", "error", err)
 	}
 
 	samples := player.GetSamplesPlayed()
 	durationSec := float64(samples) / float64(*sampleRate)
-	fmt.Printf("Played: %d samples (%.2f seconds)\n", samples, durationSec)
+	slog.Info("playback finished", "samples", samples, "duration_sec", durationSec)
 
 	player.PrintDiagnostics()
 }
@@ -172,7 +173,8 @@ func main() {
 func listOutputDevices() {
 	devices, err := portaudio.Devices()
 	if err != nil {
-		log.Fatal("Failed to get devices:", err)
+		slog.Error("failed to get devices", "error", err)
+		os.Exit(1)
 	}
 
 	fmt.Println("\nAvailable Output Devices:")
