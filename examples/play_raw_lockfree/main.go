@@ -18,7 +18,7 @@ func main() {
 	channels := flag.Int("channels", 2, "Number of channels (1=mono, 2=stereo)")
 	sampleRate := flag.Int("samplerate", 44100, "Sample rate in Hz")
 	bitsPerSample := flag.Int("bitspersample", 16, "Bits per sample (8, 16, 24, 32)")
-	bufferFrames := flag.Int("buffer", 512, "Frames per PortAudio buffer")
+	bufferFrames := flag.Int("buffer", 512, "Frames per PortAudio buffer (can be 0 in callback mode, see paFramesPerBufferUnspecified)")
 	ringMs := flag.Int("ringms", 250, "Ring buffer size in milliseconds of audio")
 	mode := flag.String("mode", "callback", "Audio output mode: callback (low latency) or stream (blocking I/O)")
 	inputFile := flag.String("in", "", "Input raw audio file (required)")

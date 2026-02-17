@@ -177,8 +177,8 @@ func (s *PaStream) OpenCallback(framesPerBuffer int, callback StreamCallback) er
 		return errors.New("stream already open")
 	}
 
-	if framesPerBuffer <= 0 {
-		return errors.New("framesPerBuffer must be positive")
+	if framesPerBuffer < 0 {
+		return errors.New("framesPerBuffer must be non-negative")
 	}
 
 	if callback == nil {
