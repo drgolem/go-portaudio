@@ -48,7 +48,7 @@ func TestGetVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	version := GetVersion()
 	if version == 0 {
@@ -117,7 +117,7 @@ func TestGetDeviceCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	count, err := GetDeviceCount()
 	if err != nil {
@@ -137,7 +137,7 @@ func TestGetDeviceInfo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	count, err := GetDeviceCount()
 	if err != nil {
@@ -175,7 +175,7 @@ func TestDefaultOutputDevice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	device, err := DefaultOutputDevice()
 	if err != nil {
@@ -195,7 +195,7 @@ func TestDefaultInputDevice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	device, err := DefaultInputDevice()
 	if err != nil {
@@ -215,7 +215,7 @@ func TestGetHostApiCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	count, err := GetHostApiCount()
 	if err != nil {
@@ -235,7 +235,7 @@ func TestGetHostApiInfo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	count, err := GetHostApiCount()
 	if err != nil {
@@ -267,7 +267,7 @@ func TestDevices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	devices, err := Devices()
 	if err != nil {
@@ -292,7 +292,7 @@ func TestNewOutputStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	// Get default output device
 	outputDevice, err := DefaultOutputDevice()
@@ -335,7 +335,7 @@ func TestNewCallbackStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	// Get default output device
 	outputDevice, err := DefaultOutputDevice()
@@ -365,8 +365,8 @@ func TestNewCallbackStream(t *testing.T) {
 		t.Error("Expected UseHighLatency=false for callback stream")
 	}
 
-	if stream.StreamFlags != ClipOff {
-		t.Error("Expected StreamFlags=ClipOff for callback stream")
+	if stream.StreamFlags != NoFlag {
+		t.Errorf("Expected StreamFlags=NoFlag for callback stream, got %d", stream.StreamFlags)
 	}
 
 	t.Logf("Created callback stream: %d channels, %.0f Hz (device %s)", stream.OutputParameters.ChannelCount, stream.SampleRate, outputDevice.Name)
@@ -378,7 +378,7 @@ func TestNewInputStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	// Get default input device
 	inputDevice, err := DefaultInputDevice()
@@ -424,7 +424,7 @@ func TestIsFormatSupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	// Get default output device
 	outputDevice, err := DefaultOutputDevice()
@@ -473,7 +473,7 @@ func TestStreamLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	// Get default output device
 	outputDevice, err := DefaultOutputDevice()
@@ -516,7 +516,7 @@ func TestCallbackStreamLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	// Get default output device
 	outputDevice, err := DefaultOutputDevice()
@@ -570,7 +570,7 @@ func TestGetWriteAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	// Get default output device
 	outputDevice, err := DefaultOutputDevice()
@@ -595,7 +595,7 @@ func TestGetWriteAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartStream failed: %v", err)
 	}
-	defer stream.StopStream()
+	defer func() { _ = stream.StopStream() }()
 
 	// Check write availability
 	available, err := stream.GetWriteAvailable()
@@ -613,7 +613,7 @@ func TestInvalidOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	defer Terminate()
+	defer func() { _ = Terminate() }()
 
 	// Get default output device
 	outputDevice, err := DefaultOutputDevice()

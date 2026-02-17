@@ -148,7 +148,11 @@ stream.UseHighLatency = true   // ~50-100ms latency, fewer underruns
 
 #### Stream Flags
 ```go
-stream.StreamFlags = portaudio.ClipOff    // Disable output clipping
+// ClipOff: only for float output guaranteed within [-1.0, 1.0].
+// Avoid for integer formats — some backends convert internally to float
+// and skipping clipping can cause distortion.
+stream.StreamFlags = portaudio.ClipOff
+
 stream.StreamFlags = portaudio.DitherOff  // Disable dithering
 ```
 

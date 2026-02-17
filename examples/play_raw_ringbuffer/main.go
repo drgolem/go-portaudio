@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -33,23 +34,37 @@ type RawAudioPlayer struct {
 	channels       int
 	sampleRate     int
 	bytesPerSample int
+	framesPerBuf   int
+	ringSize       int
 	samplesPlayed  atomic.Uint64
 	underflows     atomic.Uint64
-	eof            atomic.Bool // file fully read by producer
-	drained        atomic.Bool // ring buffer drained after EOF
-}
+	silentBytes    atomic.Uint64 // bytes of silence inserted due to partial reads
+	eof            atomic.Bool   // file fully read by producer
+	drained        atomic.Bool   // ring buffer drained after EOF
 
-const (
-	framesPerBuffer = 512
-	// Ring buffer holds ~500ms of audio at 44.1kHz stereo 16-bit.
-	// This gives the producer goroutine ample headroom.
-	ringBufferSize = 64 * 1024
-)
+	// Data integrity counters — track bytes at each pipeline stage
+	bytesFromFile atomic.Uint64 // total bytes returned by file.Read (producer)
+	bytesToRing   atomic.Uint64 // total bytes accepted by ring.Write (producer)
+	bytesFromRing atomic.Uint64 // total bytes returned by ring.TryRead (callback)
+	bytesOutput   atomic.Uint64 // total bytes delivered to PortAudio (ring data + silence)
+
+	// Diagnostics (written only from the audio callback thread)
+	callbackCount    atomic.Uint64
+	lastCallbackNano atomic.Int64
+	maxIntervalNs    atomic.Int64
+	totalIntervalNs  atomic.Int64
+	maxDurationNs    atomic.Int64
+	totalDurationNs  atomic.Int64
+	minBufferFill    atomic.Int64
+}
 
 func main() {
 	deviceIdx := flag.Int("device", 1, "Audio output device index")
-	channels := flag.Int("channels", 1, "Number of channels (1=mono, 2=stereo)")
-	sampleRate := flag.Int("rate", 44100, "Sample rate in Hz")
+	channels := flag.Int("channels", 2, "Number of channels (1=mono, 2=stereo)")
+	sampleRate := flag.Int("samplerate", 44100, "Sample rate in Hz")
+	bitsPerSample := flag.Int("bitspersample", 16, "Bits per sample (8, 16, 24, 32)")
+	bufferFrames := flag.Int("buffer", 512, "Frames per PortAudio callback buffer")
+	ringMs := flag.Int("ringms", 250, "Ring buffer size in milliseconds of audio")
 	inputFile := flag.String("in", "", "Input raw audio file (required)")
 	listDevices := flag.Bool("list", false, "List available output devices and exit")
 
@@ -64,10 +79,10 @@ func main() {
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, "Examples:")
 		fmt.Fprintln(os.Stderr, "  play_raw_ringbuffer -list")
-		fmt.Fprintln(os.Stderr, "  play_raw_ringbuffer -in recording.raw -channels 1 -rate 44100")
-		fmt.Fprintln(os.Stderr, "  play_raw_ringbuffer -in audio.raw -channels 2 -rate 48000 -device 1")
+		fmt.Fprintln(os.Stderr, "  play_raw_ringbuffer -in recording.raw -channels 1 -samplerate 44100")
+		fmt.Fprintln(os.Stderr, "  play_raw_ringbuffer -in audio.raw -channels 2 -bitspersample 24 -samplerate 48000 -device 1")
 		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "Note: Input must be raw PCM (16-bit signed integer, little-endian).")
+		fmt.Fprintln(os.Stderr, "Note: Input must be raw PCM (signed integer, little-endian).")
 	}
 	flag.Parse()
 
@@ -89,13 +104,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	sampleFormat, err := sampleFormatFromBits(*bitsPerSample)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	device, err := portaudio.GetDeviceInfo(*deviceIdx)
 	if err != nil {
 		log.Fatalf("Failed to get device %d: %v", *deviceIdx, err)
 	}
 	fmt.Printf("Using output device %d: %s\n", *deviceIdx, device.Name)
 
-	player, err := NewRawAudioPlayer(*deviceIdx, *channels, *sampleRate, *inputFile)
+	player, err := NewRawAudioPlayer(*deviceIdx, *channels, sampleFormat, *sampleRate, *bufferFrames, *ringMs, *inputFile)
 	if err != nil {
 		log.Fatal("Failed to create player:", err)
 	}
@@ -103,7 +123,8 @@ func main() {
 
 	if fileInfo, err := os.Stat(*inputFile); err == nil {
 		fileSize := fileInfo.Size()
-		samples := fileSize / int64(*channels*2)
+		bytesPerSample := *bitsPerSample / 8
+		samples := fileSize / int64(*channels*bytesPerSample)
 		durationSec := float64(samples) / float64(*sampleRate)
 		fmt.Printf("File size: %d bytes (%.2f seconds)\n", fileSize, durationSec)
 	}
@@ -112,7 +133,8 @@ func main() {
 	defer stop()
 
 	fmt.Printf("Playing %s...\n", *inputFile)
-	fmt.Printf("Configuration: %d channel(s), %d Hz, 16-bit PCM\n", *channels, *sampleRate)
+	fmt.Printf("Configuration: %d channel(s), %d Hz, %d-bit PCM, buffer %d frames, ring %d ms\n",
+		*channels, *sampleRate, *bitsPerSample, *bufferFrames, *ringMs)
 	fmt.Println("Press Ctrl-C to stop playback")
 
 	if err := player.Start(ctx); err != nil {
@@ -139,9 +161,8 @@ done:
 	samples := player.GetSamplesPlayed()
 	durationSec := float64(samples) / float64(*sampleRate)
 	fmt.Printf("Played: %d samples (%.2f seconds)\n", samples, durationSec)
-	if u := player.underflows.Load(); u > 0 {
-		fmt.Printf("Warning: %d output underflow(s) detected (audio glitches)\n", u)
-	}
+
+	player.PrintDiagnostics()
 }
 
 func listOutputDevices() {
@@ -165,26 +186,47 @@ func listOutputDevices() {
 	}
 }
 
-func NewRawAudioPlayer(device int, channels int, sampleRate int, inputFile string) (*RawAudioPlayer, error) {
+func sampleFormatFromBits(bits int) (portaudio.PaSampleFormat, error) {
+	switch bits {
+	case 8:
+		return portaudio.SampleFmtInt8, nil
+	case 16:
+		return portaudio.SampleFmtInt16, nil
+	case 24:
+		return portaudio.SampleFmtInt24, nil
+	case 32:
+		return portaudio.SampleFmtInt32, nil
+	default:
+		return 0, fmt.Errorf("unsupported bits per sample: %d (use 8, 16, 24, or 32)", bits)
+	}
+}
+
+func NewRawAudioPlayer(device int, channels int, sampleFormat portaudio.PaSampleFormat, sampleRate int, framesPerBuffer int, ringMs int, inputFile string) (*RawAudioPlayer, error) {
 	file, err := os.Open(inputFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open input file: %w", err)
 	}
 
-	stream, err := portaudio.NewCallbackStream(device, channels, portaudio.SampleFmtInt16, float64(sampleRate))
+	stream, err := portaudio.NewCallbackStream(device, channels, sampleFormat, float64(sampleRate))
 	if err != nil {
 		file.Close()
 		return nil, fmt.Errorf("failed to create callback stream: %w", err)
 	}
 
+	bytesPerSample := portaudio.GetSampleSize(sampleFormat)
+	ringSize := sampleRate * channels * bytesPerSample * ringMs / 1000
+
 	player := &RawAudioPlayer{
 		stream:         stream,
 		file:           file,
-		ring:           ringbuffer.New(ringBufferSize),
+		ring:           ringbuffer.New(ringSize),
 		channels:       channels,
 		sampleRate:     sampleRate,
-		bytesPerSample: 2,
+		bytesPerSample: bytesPerSample,
+		framesPerBuf:   framesPerBuffer,
+		ringSize:       ringSize,
 	}
+	player.minBufferFill.Store(int64(ringSize))
 
 	return player, nil
 }
@@ -195,7 +237,7 @@ func (p *RawAudioPlayer) Start(ctx context.Context) error {
 	go p.producer(ctx)
 
 	// Open and start audio stream
-	if err := p.stream.OpenCallback(framesPerBuffer, p.audioCallback); err != nil {
+	if err := p.stream.OpenCallback(p.framesPerBuf, p.audioCallback); err != nil {
 		return fmt.Errorf("failed to open callback: %w", err)
 	}
 	if err := p.stream.StartStream(); err != nil {
@@ -223,7 +265,14 @@ func (p *RawAudioPlayer) producer(ctx context.Context) {
 
 		n, err := p.file.Read(buf)
 		if n > 0 {
-			p.ring.Write(buf[:n])
+			p.bytesFromFile.Add(uint64(n))
+			written, _ := p.ring.Write(buf[:n])
+			for written < n {
+				time.Sleep(500 * time.Microsecond)
+				w, _ := p.ring.Write(buf[written:n])
+				written += w
+			}
+			p.bytesToRing.Add(uint64(written))
 		}
 		if err != nil {
 			if err == io.EOF {
@@ -242,16 +291,31 @@ func (p *RawAudioPlayer) audioCallback(
 	timeInfo *portaudio.StreamCallbackTimeInfo,
 	statusFlags portaudio.StreamCallbackFlags,
 ) portaudio.StreamCallbackResult {
+	startNano := time.Now().UnixNano()
+
+	// Track interval between callbacks
+	if last := p.lastCallbackNano.Swap(startNano); last != 0 {
+		interval := startNano - last
+		p.totalIntervalNs.Add(interval)
+		if interval > p.maxIntervalNs.Load() {
+			p.maxIntervalNs.Store(interval)
+		}
+	}
 
 	if statusFlags&portaudio.OutputUnderflow != 0 {
 		p.underflows.Add(1)
 	}
 
-	bytesNeeded := int(frameCount) * p.channels * p.bytesPerSample
+	// Track buffer fill before reading
+	fill := int64(p.ring.Length())
+	if fill < p.minBufferFill.Load() {
+		p.minBufferFill.Store(fill)
+	}
 
-	// TryRead is non-blocking: returns immediately even if the internal
-	// lock is held by the producer goroutine.
+	bytesNeeded := int(frameCount) * p.channels * p.bytesPerSample
 	n, _ := p.ring.TryRead(output[:bytesNeeded])
+	p.bytesFromRing.Add(uint64(n))
+	p.bytesOutput.Add(uint64(bytesNeeded))
 
 	if n < bytesNeeded {
 		// Fill remainder with silence
@@ -262,30 +326,45 @@ func (p *RawAudioPlayer) audioCallback(
 		if p.eof.Load() && p.ring.Length() == 0 {
 			p.drained.Store(true)
 			p.samplesPlayed.Add(uint64(n / (p.channels * p.bytesPerSample)))
+			p.trackCallbackDuration(startNano)
 			return portaudio.Complete
 		}
 
-		// Otherwise it's just a temporary underflow — the producer
-		// hasn't filled the buffer fast enough.
+		// Mid-playback silence — producer couldn't keep up
+		p.silentBytes.Add(uint64(bytesNeeded - n))
 		if n == 0 {
 			p.underflows.Add(1)
 		}
 	}
 
 	p.samplesPlayed.Add(uint64(n / (p.channels * p.bytesPerSample)))
+	p.trackCallbackDuration(startNano)
 	return portaudio.Continue
 }
 
-func (p *RawAudioPlayer) Stop() error {
-	if p.stream != nil {
-		if err := p.stream.StopStream(); err != nil {
-			return fmt.Errorf("failed to stop stream: %w", err)
-		}
-		if err := p.stream.CloseCallback(); err != nil {
-			return fmt.Errorf("failed to close callback: %w", err)
-		}
+// trackCallbackDuration records how long the callback took.
+func (p *RawAudioPlayer) trackCallbackDuration(startNano int64) {
+	duration := time.Now().UnixNano() - startNano
+	p.totalDurationNs.Add(duration)
+	if duration > p.maxDurationNs.Load() {
+		p.maxDurationNs.Store(duration)
 	}
-	return nil
+	p.callbackCount.Add(1)
+}
+
+func (p *RawAudioPlayer) Stop() error {
+	if p.stream == nil {
+		return nil
+	}
+	var errs []error
+	if err := p.stream.StopStream(); err != nil {
+		errs = append(errs, fmt.Errorf("stop stream: %w", err))
+	}
+	if err := p.stream.CloseCallback(); err != nil {
+		errs = append(errs, fmt.Errorf("close callback: %w", err))
+	}
+	p.stream = nil
+	return errors.Join(errs...)
 }
 
 func (p *RawAudioPlayer) Close() error {
@@ -302,4 +381,60 @@ func (p *RawAudioPlayer) GetSamplesPlayed() uint64 {
 
 func (p *RawAudioPlayer) IsDrained() bool {
 	return p.drained.Load()
+}
+
+func (p *RawAudioPlayer) PrintDiagnostics() {
+	count := p.callbackCount.Load()
+	if count < 2 {
+		return
+	}
+
+	expectedMs := float64(p.framesPerBuf) / float64(p.sampleRate) * 1000
+	budgetUs := expectedMs * 1000
+
+	avgIntervalMs := float64(p.totalIntervalNs.Load()) / float64(count-1) / 1e6
+	maxIntervalMs := float64(p.maxIntervalNs.Load()) / 1e6
+	avgDurationUs := float64(p.totalDurationNs.Load()) / float64(count) / 1e3
+	maxDurationUs := float64(p.maxDurationNs.Load()) / 1e3
+	minFill := p.minBufferFill.Load()
+	ringMs := float64(p.ringSize) / float64(p.sampleRate*p.channels*p.bytesPerSample) * 1000
+
+	fmt.Printf("\nDiagnostics (%d callbacks, %d frames/buffer, ring %d bytes / %.0f ms):\n",
+		count, p.framesPerBuf, p.ringSize, ringMs)
+	fmt.Printf("  Callback interval:  avg %.2f ms,  max %.2f ms  (expected %.2f ms)\n",
+		avgIntervalMs, maxIntervalMs, expectedMs)
+	fmt.Printf("  Callback duration:  avg %.0f μs,  max %.0f μs  (budget %.0f μs)\n",
+		avgDurationUs, maxDurationUs, budgetUs)
+	fmt.Printf("  Min buffer fill:    %d bytes (%.1f%%)\n",
+		minFill, float64(minFill)/float64(p.ringSize)*100)
+	if u := p.underflows.Load(); u > 0 {
+		fmt.Printf("  Underflows:         %d\n", u)
+	}
+	if s := p.silentBytes.Load(); s > 0 {
+		silentMs := float64(s) / float64(p.sampleRate*p.channels*p.bytesPerSample) * 1000
+		fmt.Printf("  Silence inserted:   %d bytes (%.1f ms)\n", s, silentMs)
+	}
+
+	// Data integrity report
+	fromFile := p.bytesFromFile.Load()
+	toRing := p.bytesToRing.Load()
+	fromRing := p.bytesFromRing.Load()
+	output := p.bytesOutput.Load()
+	silence := p.silentBytes.Load()
+	residual := p.ring.Length()
+
+	fmt.Printf("\n  Data integrity:\n")
+	fmt.Printf("    File → Ring:    %d read, %d written", fromFile, toRing)
+	if fromFile == toRing {
+		fmt.Printf("  ✓\n")
+	} else {
+		fmt.Printf("  MISMATCH (lost %d bytes)\n", fromFile-toRing)
+	}
+	fmt.Printf("    Ring → Output:  %d read, %d residual", fromRing, residual)
+	if fromRing+uint64(residual) == toRing {
+		fmt.Printf("  ✓\n")
+	} else {
+		fmt.Printf("  MISMATCH (expected %d, got %d)\n", toRing, fromRing+uint64(residual))
+	}
+	fmt.Printf("    Output total:   %d bytes (%d audio + %d silence)\n", output, fromRing, silence)
 }

@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -125,39 +126,42 @@ type streamCallbackInfo struct {
 	timeInfo StreamCallbackTimeInfo
 }
 
-// Callback registry to map stream IDs to Go callbacks and stream parameters
-// Using integer IDs instead of pointers avoids Go pointer passing issues
+// Callback registry to map stream IDs to Go callbacks and stream parameters.
+// Uses sync.Map for lock-free reads on the audio callback hot path.
+// Entries are written once at OpenCallback and deleted at CloseCallback,
+// so sync.Map's read-optimized path (atomic pointer load) is ideal.
 var (
-	callbackRegistry   = make(map[int]*streamCallbackInfo)
-	callbackRegistryMu sync.RWMutex
-	nextStreamID       = 1
+	callbackRegistry sync.Map     // map[int]*streamCallbackInfo
+	nextStreamID     atomic.Int64 // monotonically increasing stream ID
 )
+
+func init() {
+	nextStreamID.Store(1)
+}
 
 // registerCallback stores a callback and stream info for a stream and returns the stream ID
 func registerCallback(callback StreamCallback, info *streamCallbackInfo) int {
-	callbackRegistryMu.Lock()
-	defer callbackRegistryMu.Unlock()
-
-	id := nextStreamID
-	nextStreamID++
+	id := int(nextStreamID.Add(1) - 1)
 	info.callback = callback
-	callbackRegistry[id] = info
+	callbackRegistry.Store(id, info)
 	return id
 }
 
 // unregisterCallback removes a callback for a stream ID
 func unregisterCallback(id int) {
-	callbackRegistryMu.Lock()
-	defer callbackRegistryMu.Unlock()
-	delete(callbackRegistry, id)
+	callbackRegistry.Delete(id)
 }
 
-// getCallbackInfo retrieves callback info for a stream ID
+// getCallbackInfo retrieves callback info for a stream ID.
+// Lock-free on the hot path: sync.Map.Load uses an atomic pointer read
+// for entries that have been loaded before (which is always true for
+// active streams — registered at OpenCallback, read every callback).
 func getCallbackInfo(id int) (*streamCallbackInfo, bool) {
-	callbackRegistryMu.RLock()
-	defer callbackRegistryMu.RUnlock()
-	info, ok := callbackRegistry[id]
-	return info, ok
+	v, ok := callbackRegistry.Load(id)
+	if !ok {
+		return nil, false
+	}
+	return v.(*streamCallbackInfo), true
 }
 
 // OpenCallback opens the stream with a callback function.

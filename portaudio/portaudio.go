@@ -125,8 +125,10 @@ type PaStreamFlags int
 const (
 	// NoFlag is the default, no special flags set
 	NoFlag PaStreamFlags = 0x00000000
-	// ClipOff disables automatic output clipping. Recommended for blocking I/O
-	// when you guarantee the output samples are within range [-1.0, 1.0].
+	// ClipOff disables automatic output clipping. Only use when outputting float
+	// samples that are guaranteed to stay within [-1.0, 1.0]. Avoid for integer
+	// formats — some backends do internal float conversion where skipping
+	// clipping can cause distortion.
 	ClipOff PaStreamFlags = 0x00000001
 	// DitherOff disables dithering when converting from float to integer samples
 	DitherOff PaStreamFlags = 0x00000002
@@ -209,9 +211,8 @@ type PaStream struct {
 	InputParameters  *PaStreamParameters // nil for output-only streams
 	OutputParameters *PaStreamParameters // nil for input-only streams
 	SampleRate       float64
-	// StreamFlags specifies special options for the stream.
-	// For blocking I/O, ClipOff is recommended when output samples are guaranteed
-	// to be within [-1.0, 1.0] range. Default is NoFlag.
+	// StreamFlags specifies special options for the stream. Default is NoFlag.
+	// Set ClipOff only for float output that is guaranteed within [-1.0, 1.0].
 	StreamFlags PaStreamFlags
 	// UseHighLatency when true uses DefaultHighOutputLatency instead of
 	// DefaultLowOutputLatency. Recommended for blocking I/O to avoid underruns.
@@ -565,7 +566,6 @@ func NewInputStream(inParams PaStreamParameters, sampleRate float64) (*PaStream,
 //
 // The returned stream is configured with:
 //   - High latency mode (recommended for blocking I/O to avoid underruns)
-//   - ClipOff flag (assumes samples are within valid range)
 //
 // Example:
 //
@@ -591,7 +591,6 @@ func NewOutputStream(device int, channels int, sampleFormat PaSampleFormat, samp
 
 	// Configure for blocking I/O
 	stream.UseHighLatency = true
-	stream.StreamFlags = ClipOff
 
 	return stream, nil
 }
@@ -607,7 +606,6 @@ func NewOutputStream(device int, channels int, sampleFormat PaSampleFormat, samp
 //
 // The returned stream is configured with:
 //   - Low latency mode (optimized for real-time audio callbacks)
-//   - ClipOff flag (assumes samples are within valid range)
 //
 // After creating the stream, call OpenCallback() to register your audio callback,
 // then StartStream() to begin audio processing.
@@ -639,7 +637,6 @@ func NewCallbackStream(device int, channels int, sampleFormat PaSampleFormat, sa
 
 	// Configure for callback mode
 	stream.UseHighLatency = false // Low latency for real-time audio
-	stream.StreamFlags = ClipOff
 
 	return stream, nil
 }
