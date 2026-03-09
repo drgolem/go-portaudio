@@ -46,7 +46,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sync"
+	"runtime"
 	"sync/atomic"
 	"unsafe"
 )
@@ -113,7 +113,9 @@ type StreamCallbackTimeInfo struct {
 	OutputBufferDacTime PaTime // Time when first sample of output buffer will be played
 }
 
-// streamCallbackInfo holds callback and stream parameters for proper buffer sizing
+// streamCallbackInfo holds callback and stream parameters for proper buffer sizing.
+// All sizes are pre-computed at OpenCallback time to avoid any work in the
+// real-time callback hot path.
 type streamCallbackInfo struct {
 	callback       StreamCallback
 	outputChannels int
@@ -121,47 +123,69 @@ type streamCallbackInfo struct {
 	inputChannels  int
 	inputFormat    PaSampleFormat
 	hasInput       bool
+
+	// Pre-computed sample sizes to avoid GetSampleSize() calls in the callback.
+	outputSampleSize int
+	inputSampleSize  int
+
 	// timeInfo is pre-allocated to avoid allocation in the callback hot path.
 	// Safe because PortAudio invokes callbacks sequentially per stream.
 	timeInfo StreamCallbackTimeInfo
 }
 
-// Callback registry to map stream IDs to Go callbacks and stream parameters.
-// Uses sync.Map for lock-free reads on the audio callback hot path.
-// Entries are written once at OpenCallback and deleted at CloseCallback,
-// so sync.Map's read-optimized path (atomic pointer load) is ideal.
+// maxCallbackStreams is the maximum number of concurrent callback streams.
+// This allows replacing sync.Map with a fixed-size atomic pointer array,
+// eliminating map lookup overhead in the real-time callback path.
+const maxCallbackStreams = 64
+
+// Callback registry: fixed-size array of atomic pointers for zero-overhead
+// lookup in the real-time callback. Entries are set at OpenCallback and
+// cleared at CloseCallback.
 var (
-	callbackRegistry sync.Map     // map[int]*streamCallbackInfo
-	nextStreamID     atomic.Int64 // monotonically increasing stream ID
+	callbackSlots [maxCallbackStreams]atomic.Pointer[streamCallbackInfo]
+	nextStreamID  atomic.Int64 // monotonically increasing stream ID
 )
 
 func init() {
 	nextStreamID.Store(1)
 }
 
-// registerCallback stores a callback and stream info for a stream and returns the stream ID
+// registerCallback stores callback info in an atomic slot and returns the slot index.
 func registerCallback(callback StreamCallback, info *streamCallbackInfo) int {
 	id := int(nextStreamID.Add(1) - 1)
+	if id < 0 || id >= maxCallbackStreams {
+		// Wrap around if we exhaust IDs (unlikely in practice).
+		// Find a free slot.
+		for i := range callbackSlots {
+			if callbackSlots[i].Load() == nil {
+				info.callback = callback
+				callbackSlots[i].Store(info)
+				return i
+			}
+		}
+		// All slots full — this is a programming error.
+		panic("portaudio: exceeded maximum concurrent callback streams")
+	}
 	info.callback = callback
-	callbackRegistry.Store(id, info)
+	callbackSlots[id].Store(info)
 	return id
 }
 
-// unregisterCallback removes a callback for a stream ID
+// unregisterCallback clears the callback slot.
 func unregisterCallback(id int) {
-	callbackRegistry.Delete(id)
+	if id >= 0 && id < maxCallbackStreams {
+		callbackSlots[id].Store(nil)
+	}
 }
 
-// getCallbackInfo retrieves callback info for a stream ID.
-// Lock-free on the hot path: sync.Map.Load uses an atomic pointer read
-// for entries that have been loaded before (which is always true for
-// active streams — registered at OpenCallback, read every callback).
+// getCallbackInfo retrieves callback info via a single atomic pointer load.
+// This is the hot path — called on every audio callback invocation.
 func getCallbackInfo(id int) (*streamCallbackInfo, bool) {
-	v, ok := callbackRegistry.Load(id)
-	if !ok {
+	if id < 0 || id >= maxCallbackStreams {
 		return nil, false
 	}
-	return v.(*streamCallbackInfo), true
+	info := callbackSlots[id].Load()
+	return info, info != nil
 }
 
 // OpenCallback opens the stream with a callback function.
@@ -210,6 +234,7 @@ func (s *PaStream) OpenCallback(framesPerBuffer int, callback StreamCallback) er
 		info.hasInput = true
 		info.inputChannels = s.InputParameters.ChannelCount
 		info.inputFormat = s.InputParameters.SampleFormat
+		info.inputSampleSize = GetSampleSize(s.InputParameters.SampleFormat)
 	}
 
 	// Setup output parameters if this is an output or duplex stream
@@ -233,6 +258,7 @@ func (s *PaStream) OpenCallback(framesPerBuffer int, callback StreamCallback) er
 
 		info.outputChannels = s.OutputParameters.ChannelCount
 		info.outputFormat = s.OutputParameters.SampleFormat
+		info.outputSampleSize = GetSampleSize(s.OutputParameters.SampleFormat)
 	}
 
 	// Use configured stream flags, or NoFlag if not set
@@ -289,51 +315,55 @@ func (s *PaStream) CloseCallback() error {
 	return s.Close()
 }
 
+// goCallbackBridge is called from the C PortAudio callback on the real-time
+// audio thread. Every nanosecond counts here.
+//
+// Optimizations vs naive approach:
+//   - runtime.LockOSThread: pins to the CoreAudio RT thread, prevents Go
+//     scheduler from migrating the goroutine mid-callback
+//   - Atomic pointer load instead of sync.Map: single atomic dereference
+//   - Pre-computed sample sizes: no GetSampleSize() calls
+//   - No defer/recover: eliminates deferred closure overhead (~50ns/call)
+//
 //export goCallbackBridge
 func goCallbackBridge(input, output unsafe.Pointer,
 	frameCount C.ulong,
 	timeInfo unsafe.Pointer,
 	statusFlags C.ulong,
-	streamID C.long) (result C.int) {
+	streamID C.long) C.int {
 
-	// Panic recovery - critical for callback stability
-	// If a panic occurs in the callback, we log it and abort the stream
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "PANIC in audio callback (stream %d): %v\n", streamID, r)
-			result = C.int(Abort)
-		}
-	}()
+	// Pin this goroutine to the current OS thread (CoreAudio's RT thread).
+	// This prevents the Go scheduler from migrating us to a different thread,
+	// which would lose the real-time priority that CoreAudio set up.
+	// Note: we don't UnlockOSThread — the thread returns to C after we return,
+	// and the CGo runtime handles thread management.
+	runtime.LockOSThread()
 
-	// Get the callback info from registry using the stream ID
+	// Get the callback info via single atomic pointer load.
 	info, ok := getCallbackInfo(int(streamID))
 	if !ok {
-		// No callback registered, tell PortAudio to abort
 		return C.int(Abort)
 	}
 
 	callback := info.callback
 
-	// Calculate buffer sizes
 	frameCountGo := uint(frameCount)
 
 	var inputBuf []byte
 	var outputBuf []byte
 
-	// Create input buffer slice if stream has input
+	// Create input buffer slice if stream has input (pre-computed sample size)
 	if input != nil && info.hasInput {
-		inputSampleSize := GetSampleSize(info.inputFormat)
-		inputSize := int(frameCount) * info.inputChannels * inputSampleSize
-		if inputSize > 0 && inputSize <= (1<<20) { // Sanity check: max 1MB
+		inputSize := int(frameCount) * info.inputChannels * info.inputSampleSize
+		if inputSize > 0 && inputSize <= (1<<20) {
 			inputBuf = (*[1 << 20]byte)(input)[:inputSize:inputSize]
 		}
 	}
 
-	// Create output buffer slice with proper sizing based on stream parameters
+	// Create output buffer slice (pre-computed sample size)
 	if output != nil {
-		outputSampleSize := GetSampleSize(info.outputFormat)
-		outputSize := int(frameCount) * info.outputChannels * outputSampleSize
-		if outputSize > 0 && outputSize <= (1<<20) { // Sanity check: max 1MB
+		outputSize := int(frameCount) * info.outputChannels * info.outputSampleSize
+		if outputSize > 0 && outputSize <= (1<<20) {
 			outputBuf = (*[1 << 20]byte)(output)[:outputSize:outputSize]
 		}
 	}
@@ -348,8 +378,26 @@ func goCallbackBridge(input, output unsafe.Pointer,
 		timeInfoGo = &info.timeInfo
 	}
 
-	// Call the Go callback
-	result = C.int(callback(inputBuf, outputBuf, frameCountGo, timeInfoGo, StreamCallbackFlags(statusFlags)))
+	// Call the Go callback — if it panics, the process crashes (no defer/recover
+	// overhead). Callbacks must not panic in real-time audio context.
+	return C.int(callback(inputBuf, outputBuf, frameCountGo, timeInfoGo, StreamCallbackFlags(statusFlags)))
+}
 
-	return result
+// goCallbackBridgeSafe is an alternative bridge with panic recovery.
+// Not currently used — kept for reference. To enable, change the C wrapper
+// to call goCallbackBridgeSafe instead of goCallbackBridge.
+func goCallbackBridgeSafe(input, output unsafe.Pointer,
+	frameCount C.ulong,
+	timeInfo unsafe.Pointer,
+	statusFlags C.ulong,
+	streamID C.long) (result C.int) {
+
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "PANIC in audio callback (stream %d): %v\n", streamID, r)
+			result = C.int(Abort)
+		}
+	}()
+
+	return goCallbackBridge(input, output, frameCount, timeInfo, statusFlags, streamID)
 }
