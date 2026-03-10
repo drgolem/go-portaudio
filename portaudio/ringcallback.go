@@ -18,6 +18,7 @@ typedef struct {
     _Atomic long   underflows;
     _Atomic long   silentBytes;
     _Atomic long   samplesPlayed;
+    _Atomic int    muted;     // when non-zero, callback outputs silence and drains ring
     int            frameSize; // bytes per frame (channels * bytesPerSample)
 } CRingBuffer;
 
@@ -33,6 +34,7 @@ static CRingBuffer* cring_new(int capacity, int frameSize) {
     atomic_store(&rb->underflows, 0);
     atomic_store(&rb->silentBytes, 0);
     atomic_store(&rb->samplesPlayed, 0);
+    atomic_store(&rb->muted, 0);
     return rb;
 }
 
@@ -41,6 +43,19 @@ static void cring_free(CRingBuffer *rb) {
         free(rb->buf);
         free(rb);
     }
+}
+
+// Mute makes the callback output silence and drain the ring buffer.
+// Called from Go (producer) on stop/pause for immediate silence.
+static void cring_mute(CRingBuffer *rb) {
+    atomic_store_explicit(&rb->muted, 1, memory_order_release);
+}
+
+// Unmute resumes normal playback from the ring buffer.
+// The caller should ensure the ring is drained (Available()==0) before
+// unmuting to avoid playing stale audio.
+static void cring_unmute(CRingBuffer *rb) {
+    atomic_store_explicit(&rb->muted, 0, memory_order_release);
 }
 
 // Available bytes to read (called from callback — must be fast).
@@ -108,6 +123,15 @@ static int paRingCallbackFunc(const void *input, void *output,
                               void *userData) {
     CRingBuffer *rb = (CRingBuffer*)userData;
     int bytesNeeded = (int)frameCount * rb->frameSize;
+
+    // When muted, drain the ring buffer but output silence.
+    if (atomic_load_explicit(&rb->muted, memory_order_acquire)) {
+        // Advance readPos to writePos to discard buffered data.
+        int w = atomic_load_explicit(&rb->writePos, memory_order_acquire);
+        atomic_store_explicit(&rb->readPos, w, memory_order_release);
+        memset(output, 0, bytesNeeded);
+        return paContinue;
+    }
 
     // Only read frame-aligned data
     int avail = cring_available(rb);
@@ -191,6 +215,22 @@ func (r *CRing) Free() {
 	if r.rb != nil {
 		C.cring_free(r.rb)
 		r.rb = nil
+	}
+}
+
+// Mute makes the callback output silence and drain buffered audio.
+// Call on stop/pause for immediate silence. Safe to call from Go (producer).
+func (r *CRing) Mute() {
+	if r.rb != nil {
+		C.cring_mute(r.rb)
+	}
+}
+
+// Unmute resumes normal playback from the ring buffer.
+// Call before writing new audio data. Safe to call from Go (producer).
+func (r *CRing) Unmute() {
+	if r.rb != nil {
+		C.cring_unmute(r.rb)
 	}
 }
 
